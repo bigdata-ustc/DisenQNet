@@ -212,3 +212,30 @@ class DisenEstimator(nn.Module):
             for w in self.parameters():
                 w.data /= spectral_norm(w.data)
         return
+
+class VectorMILoss(nn.Module):
+    """
+        MI estimator between hidden vectors for maximization
+        max MI(X,Y)
+
+        :param hidden_dim: int, size of hidden vector
+        :param dropout: float, dropout rate
+    """
+
+    def __init__(self, hidden_dim, dropout):
+        super(VectorMILoss, self).__init__()
+        self.disc = Disc(hidden_dim, hidden_dim, dropout)
+        return
+    
+    def forward(self, x, y):
+        """
+            max MI(X,Y) = E_pxy[-sp(-T(x,y))] - E_pxpy[sp(T(x,y))]
+
+            :param x: Tensor of (batch_size, hidden_dim), x
+            :param y: Tensor of (batch_size, hidden_dim), y
+            :returns: Tensor of (), loss for MI maximization
+        """
+        sy = shuffle(y)
+        mi = -F.softplus(-self.disc(x, y)).mean() - F.softplus(self.disc(x, sy)).mean()
+        loss = -mi
+        return loss
