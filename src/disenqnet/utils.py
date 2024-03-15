@@ -72,69 +72,6 @@ def spectral_norm(W, n_iteration=5):
     sn = torch.mm(torch.mm(u, Wt), v.transpose(0, 1)).sum() ** 0.5
     return sn
 
-def get_topk_class(probability, top_k):
-    """
-        select top k class according probability for multi-label classification
-        :param probability: Tensor of (batch_size, class_size), probability
-        :param topk: int, number of selected classes
-        :returns: Tensor of long (batch_size, class_size), whether class is selected, 1 means class selected, 0 means class unselected
-    """
-    # batch_size * class_size
-    device = probability.device
-    batch_size, class_size = probability.size()
-    # batch_size * k
-    label_index = probability.topk(top_k, dim=-1, sorted=False)[1]
-    batch_index = torch.arange(batch_size).unsqueeze(-1).expand(-1, top_k)
-    # batch_size * class_size
-    label = torch.zeros(batch_size, class_size).long()
-    batch_index = batch_index.to(device)
-    label = label.to(device)
-    label[batch_index, label_index] = 1
-    return label
-
-def get_confuse_matrix(label, probability, top_k):
-    """
-        Confuse matrix for multi-label classification by true label and prediction according top k probability
-        :param label: Tensor of (batch_size, class_size), multi-label classification label, 1 means True, 0 means False
-        :param probability: Tensor of (batch_size, class_size), predicted probability
-        :param top_k: int, number of top k classes as positive label for multi-label classification
-        :returns: Tensor of long (3, class_size), (TP, FP, FN) count for each class
-    """
-    prediction = get_topk_class(probability, top_k).bool()
-    label = label.bool()
-    # batch_size * class_size -> class_size
-    tp = (label & prediction).sum(dim=0)
-    fp = ((~label) & prediction).sum(dim=0)
-    fn = (label & (~prediction)).sum(dim=0)
-    # 3 * class_size
-    cm = torch.stack((tp, fp, fn), dim=0)
-    return cm
-
-def get_f1_score(confuse_matrix, reduction="micro"):
-    """
-        F1 score for multi-label classification
-        Follow https://www.cnblogs.com/fledlingbird/p/10675922.html
-        :param confuse_matrix: Tensor of long (3, class_size), (TP, FP, FN) count for each class
-        :param reduction: str, macro or micro, reduction type for F1 score
-        :returns: float, f1 score for multi-label classification
-    """
-    # 3 * class_size -> class_size
-    tp, fp, fn = confuse_matrix
-    if reduction == "macro":
-        precise = tp.float() / (tp + fp).float()
-        recall = tp.float() / (tp + fn).float()
-        f1 = (2 * precise * recall) / (precise + recall)
-        f1[tp == 0] = 0
-        f1 = f1.mean().item()
-    elif reduction == "micro":
-        tp, fp, fn = tp.sum(), fp.sum(), fn.sum()
-        precise = tp.float() / (tp + fp).float()
-        recall = tp.float() / (tp + fn).float()
-        f1 = ((2 * precise * recall) / (precise + recall)).item()
-        if tp.item() == 0:
-            f1 = 0
-    return f1
-
 class MLP(nn.Module):
     """
         Multi-Layer Perceptron
@@ -246,3 +183,39 @@ class MI(nn.Module):
         sy = shuffle(y)
         mi = -F.softplus(-self.disc(x, y)).mean() - F.softplus(self.disc(x, sy)).mean()
         return mi
+
+class PairwiseLoss(nn.Module):
+    """
+        Pairwise rank loss
+        L(pos, neg) = max(0, mu-pos+neg) + l2_norm
+
+        :param mu: int, margin
+        :param w_norm: float, weight of L2 normalization
+        :param reduction: str, mean or sum, reduction type for loss
+    """
+
+    def __init__(self, mu, w_norm, reduction="mean"):
+        super().__init__()
+        self.mu = mu
+        self.w_norm = w_norm
+        self.reduction = reduction
+        return
+    
+    def forward(self, pos, neg, parameters):
+        """
+            :param pos: Tensor of (batch_size), positive samples
+            :param neg: Tensor of (batch_size), negative samples
+            :param parameters: iterable, model parameters
+        """
+        task_loss = F.relu(self.mu - pos + neg)
+        if self.reduction == "mean":
+            task_loss = task_loss.mean()
+        elif self.reduction == "sum":
+            task_loss = task_loss.sum()
+        loss = task_loss
+        if self.w_norm > 0:
+            l2_loss = sum(p.norm(p=2)**2 for p in parameters)
+            loss = task_loss + self.w_norm * l2_loss
+        else:
+            loss = task_loss
+        return loss, task_loss

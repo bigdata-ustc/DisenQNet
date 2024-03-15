@@ -7,7 +7,17 @@ from torch.optim.adam import Adam
 from torch.optim.lr_scheduler import StepLR
 
 from .modules import TextEncoder, AttnModel, ConceptEstimator, MIEstimator, DisenEstimator
-from .utils import MLP, get_mask, get_confuse_matrix, get_f1_score
+from .utils import MLP, get_mask
+from .metrics import get_confuse_matrix, get_f1_score
+
+def get_disen_q_net_hidden(text, length, model, use_vi):
+    if use_vi:
+        _, _, hidden = model(text, length, get_vk=False)
+    else:
+        _, hidden, _ = model(text, length, get_vi=False)
+    # stop gradient propagation to encoder
+    hidden = hidden.detach()
+    return hidden
 
 class QuestionEncoder(nn.Module):
     """
@@ -20,6 +30,7 @@ class QuestionEncoder(nn.Module):
 
     def __init__(self, vocab_size, hidden_dim, dropout, wv=None):
         super(QuestionEncoder, self).__init__()
+        self.vocab_size = vocab_size
         self.hidden_dim = hidden_dim
         self.encoder = TextEncoder(vocab_size, hidden_dim, dropout, wv=wv)
         self.k_model = AttnModel(hidden_dim, dropout)
@@ -53,7 +64,7 @@ class QuestionEncoder(nn.Module):
         if get_vi:
             i_hidden, _ = self.i_model(q_hidden_dp, embed_dp, embed_dp, mask)
         return embed, k_hidden, i_hidden
-
+ 
 class DisenQNet(object):
     """
         DisenQNet training and evaluation model
@@ -84,7 +95,7 @@ class DisenQNet(object):
     def train(self, train_data, test_data, device, epoch, lr, step_size, gamma, warm_up, n_adversarial, silent):
         """
             DisenQNet train
-            :param train_data: iterable, train dataset, contains text, length, concept
+            :param train_data: iterable, train dataset, contains (text, length, concept)
                 text: Tensor of (batch_size, seq_len)
                 length: Tensor of (batch_size)
                 concept: Tensor of (batch_size, class_size)
@@ -165,7 +176,7 @@ class DisenQNet(object):
     def eval(self, test_data, device):
         """
             DisenQNet test
-            :param test_data: iterable, train dataset, contains text, length, concept
+            :param test_data: iterable, train dataset, contains (text, length, concept)
                 text: Tensor of (batch_size, seq_len)
                 length: Tensor of (batch_size)
                 concept: Tensor of (batch_size, class_size)
@@ -238,7 +249,7 @@ class ConceptModel(object):
     def train(self, train_data, test_data, device, epoch, lr, step_size, gamma, silent, use_vi=False, top_k=2, reduction="micro"):
         """
             Concept model train
-            :param train_data: iterable, train dataset, contains text, length, concept
+            :param train_data: iterable, train dataset, contains (text, length, concept)
                 text: Tensor of (batch_size, seq_len)
                 length: Tensor of (batch_size)
                 concept: Tensor of (batch_size, class_size)
@@ -249,6 +260,7 @@ class ConceptModel(object):
             :param step_size: int, step_size for StepLR, period of learning rate decay
             :param gamma: float, gamma for StepLR, multiplicative factor of learning rate decay
             :param silent: bool, whether to log loss
+            :param use_vi: bool, whether to use vi or vk hidden of DisenQNet for classification
             :param top_k: int, number of top k classes as positive label for multi-label classification
             :param reduction: str, macro or micro, reduction type for F1 score
         """
@@ -264,12 +276,7 @@ class ConceptModel(object):
             for data in train_data:
                 text, length, concept = data
                 text, length, concept = text.to(device), length.to(device), concept.to(device)
-                if use_vi:
-                    _, _, hidden = self.disen_q_net(text, length, get_vk=False)
-                else:
-                    _, hidden, _ = self.disen_q_net(text, length, get_vi=False)
-                # stop gradient propagation to encoder
-                hidden = hidden.detach()
+                hidden = get_disen_q_net_hidden(text, length, self.disen_q_net, use_vi)
 
                 output = self.classifier(hidden)
                 loss = self.loss(output, concept.float())
@@ -291,11 +298,12 @@ class ConceptModel(object):
     def eval(self, test_data, device, use_vi, top_k, reduction):
         """
             Concept model test
-            :param test_data: iterable, test dataset, contains text, length, concept
+            :param test_data: iterable, test dataset, contains (text, length, concept)
                 text: Tensor of (batch_size, seq_len)
                 length: Tensor of (batch_size)
                 concept: Tensor of (batch_size, class_size)
             :param device: str, cpu or cuda
+            :param use_vi: bool, whether to use vi or vk hidden of DisenQNet for classification
             :param top_k: int, number of top k classes as positive label for multi-label classification
             :param reduction: str, macro or micro, reduction type for F1 score
             :returns: (loss, f1)
@@ -311,10 +319,7 @@ class ConceptModel(object):
             for data in test_data:
                 text, length, concept = data
                 text, length, concept = text.to(device), length.to(device), concept.to(device)
-                if use_vi:
-                    _, _, hidden = self.disen_q_net(text, length, get_vk=False)
-                else:
-                    _, hidden, _ = self.disen_q_net(text, length, get_vi=False)
+                hidden = get_disen_q_net_hidden(text, length, self.disen_q_net, use_vi)
                 output = self.classifier(hidden)
                 loss = self.loss(output, concept.float())
                 cm = get_confuse_matrix(concept.long(), output.detach(), top_k)
